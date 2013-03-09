@@ -104,6 +104,7 @@ void runCuda()
  
   // execute the kernel
   photonLaunch();
+  renderScene(pbo);
  
   // unmap buffer object
   cudaGLUnmapBufferObject(pbo);

@@ -622,6 +622,7 @@ void kd_res_rewind(struct kdres *rset)
 	rset->riter = rset->rlist->next;
 }
 
+
 int kd_res_end(struct kdres *rset)
 {
 	return rset->riter == 0;

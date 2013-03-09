@@ -11,21 +11,21 @@ struct color_t {
 	float b;
 	float f; // "filter" or "alpha"
 	
-	color_t() :
+	__host__ __device__ color_t() :
    		r(0.f),
    		g(0.f),
    		b(0.f),
    		f(1.f)
    	{}
    	
-	color_t(float r1, float b1, float g1) :
+	__host__ __device__ color_t(float r1, float b1, float g1) :
    		r(r1),
    		g(g1),
    		b(b1),
    		f(1.f)
    	{}
    	
-   	color_t(float r1, float b1, float g1, float f1) :
+   	__host__ __device__ color_t(float r1, float b1, float g1, float f1) :
    		r(r1),
    		g(g1),
    		b(b1),

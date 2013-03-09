@@ -6,7 +6,7 @@ CUDAFLAGS= -O3 -c -arch=sm_21
 
 ALL= callbacksPBO.o cudaPhotonMapper.o simpleGLmain.o simplePBO.o
 
-all= $(ALL) PhotonMapper
+all= $(ALL) RT 
 
 RT:	$(ALL)
 	$(CC) $(LDFLAGS) $(ALL) -o PhotonMapper
@@ -17,7 +17,7 @@ callbacksPBO.o:	callbacksPBO.cpp
 kernelPBO.o:	kernelPBO.cu
 	$(CC) $(CUDAFLAGS) -o $@ $<
 
-cudaRayTrace.o:	cudaPhotonMapper.cu
+cudaPhotonMapper.o:	cudaPhotonMapper.cu
 	$(CC) $(CUDAFLAGS) -o $@ $< 
 
 

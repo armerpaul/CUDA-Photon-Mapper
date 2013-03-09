@@ -16,6 +16,35 @@
 #include "types.h"
 #include "cudaPhotonMapper.h"
 #include "kdtree-0.5.6/kdtree.h"
+
+// kdtree types from kd-tree code
+// These are needed for kdtree functions to run on CUDA
+struct kdnode {
+	double *pos;
+	int dir;
+	void *data;
+
+	struct kdnode *left, *right;
+};
+
+struct res_node {
+	struct kdnode *item;
+	double dist_sq;
+	struct res_node *next;
+};
+
+struct kdtree {
+	int dim;
+	struct kdnode *root;
+	struct kdhyperrect *rect;
+	void (*destr)(void*);
+};
+
+struct kdres {
+	struct kdtree *tree;
+	struct res_node *rlist, *riter;
+	int size;
+};
  
 
 Camera * camera, *cam_d;
@@ -36,7 +65,11 @@ __host__ __device__ Point CreatePoint(float x, float y, float z);
 __host__ __device__ color_t CreateColor(float r, float g, float b);
 
 __global__ void CUDAPhotonTrace(Plane * f, RectLight *l, Sphere * s, Photon * position);
+__global__ void CUDARayTrace(Camera * cam, Plane * f, Sphere * s, kdtree * tree, uchar4 * pos);
 
+__device__ Photon * kd_res_photonf(struct kdres *rset, float *pos);
+
+__device__ color_t RayTrace(Ray r, Sphere* s, Plane* f, kdtree * tree);
 __device__ Photon PhotonTrace(Photon p, Sphere* s, Plane* f);
 __device__ color_t SphereShading(int sNdx, Ray r, Point p, Sphere* sphereList, PointLight* l);
 __device__ color_t Shading(Ray r, Point p, Point normalVector, PointLight* l, color_t diffuse, color_t ambient, color_t specular); 
@@ -277,11 +310,10 @@ extern "C" void photonLaunch()
 	CUDAPhotonTrace<<< gridSize, blockSize  >>>(p_d, l_d, s_d, ph_d);
 	cudaThreadSynchronize();
 
-	HANDLE_ERROR( cudaMemcpy(photonArray, ph_d, sizeof(Photon)*numPhotons, cudaMemcpyDeviceToHost) );
-
 	 
 	if (kdTreeIncomplete) {
-		printf("kdTreeIncomplete\n");
+		HANDLE_ERROR( cudaMemcpy(photonArray, ph_d, sizeof(Photon)*numPhotons, cudaMemcpyDeviceToHost) );
+
 		kd_clear(kdTree);
 		for(int i=0; i < numPhotons; i++) {
 			assert(0 == kd_insert3(kdTree, photonArray[i].position.x, photonArray[i].position.y, photonArray[i].position.z, &photonArray[i]));
@@ -291,7 +323,7 @@ extern "C" void photonLaunch()
 		}
 		kdTreeIncomplete = false;
 	} else {
-		
+		// Might do something here...
 	}
 	
 }
@@ -302,7 +334,7 @@ extern "C" void renderScene(uchar4 *pos)
 	
 	dim3 gridSize((WINDOW_WIDTH + 15)/16, (WINDOW_HEIGHT + 15)/16);
 	dim3 blockSize(16,16);
-	CUDARayTrace<<< gridSize, blockSize  >>>(p_d, l_d, s_d, ph_d);
+	CUDARayTrace<<< gridSize, blockSize  >>>(cam_d, p_d, s_d, kdTree, pos);
 	cudaThreadSynchronize();
 	
 	
@@ -433,7 +465,7 @@ Plane* CreatePlanes() {
 /*
  * CUDA global function which performs ray tracing. Responsible for initializing and writing to output vector
  */
-__global__ void renderScene(Camera * cam,Plane * f,PointLight * l, Sphere * s, uchar4 * pos)
+__global__ void CUDARayTrace(Camera * cam, Plane * f, Sphere * s, kdtree *tree, uchar4 * pos)
 {
 	float tanVal = tan(FOV/2);
 
@@ -459,7 +491,7 @@ __global__ void renderScene(Camera * cam,Plane * f,PointLight * l, Sphere * s, u
 	//r.direction.x += -1 * WINDOW_WIDTH / WINDOW_HEIGHT * tanVal + (2 * tanVal / WINDOW_HEIGHT) * col;
 
 	//RAY TRACE
-	returnColor = RayTrace(r, s, f, l);
+	returnColor = RayTrace(r, s, f, tree);
 
 	//CALC OUTPUT INDEX
 	int index = row *WINDOW_WIDTH + col;
@@ -475,10 +507,11 @@ __global__ void renderScene(Camera * cam,Plane * f,PointLight * l, Sphere * s, u
 /*
  * Performs Ray tracing over all spheres for any ray r
  */
-__device__ color_t RayTrace(Ray r, Sphere* s, Plane* f, PointLight* l) {
+__device__ color_t RayTrace(Ray r, Sphere* s, Plane* f, kdtree * tree) {
 	color_t color = CreateColor(0, 0, 0); 
+	kdres * nearestPhotons;
 	float t, smallest;
-	int i = 0, closestSphere = -1, closestPlane = -1,  inShadow = false;
+	int i = 0, closestSphere = -1, closestPlane = -1;
 	//r.direction += r.origin; //Set back to normal
 	Point normalVector;
 	//FIND CLOSEST SPHERE ALONG RAY R
@@ -507,64 +540,24 @@ __device__ color_t RayTrace(Ray r, Sphere* s, Plane* f, PointLight* l) {
 	i = 0;
 	Ray shadowRay;
 
-	//r.direction += r.origin;//Smallest needs to be calculated differently
-	shadowRay.origin = CreatePoint(r.direction.x * smallest, r.direction.y * smallest, r.direction.z * smallest);
-	shadowRay.origin += r.origin;
-	shadowRay.direction = l->position - shadowRay.origin;
-
-	//DETERMINE IF SPHERE IS BLOCKING RAY FROM LIGHT TO SPHERE
-	if(closestSphere > -1 || closestPlane > -1)
-	{
-		while (i <NUM_SPHERES-1 && !inShadow){ 
-			t = SphereRayIntersection(s + i, shadowRay);
-			if(i != closestSphere && t < 1 && t > 0){
-				//	printf("%f\n",t);
-				inShadow = true;
-			}
-			i++;
-		}
-		i = 0;
-		while(i < NUM_PLANES && !inShadow){
-			t = PlaneRayIntersection(f + i, shadowRay);
-			if(i != closestPlane && t < 1 && t > 0){
-				inShadow = true;
-			}
-			i++;
+	if(closestPlane > -1 || closestSphere > -1)
+	{	
+		float resPoint[3];
+		float pos[] = {r.direction.x * smallest, 
+				r.direction.y * smallest,
+				 r.direction.z * smallest};
+		nearestPhotons = kd_nearest_rangef(tree, pos, PHOTON_RANGE);
+		float dist;
+		Photon * data;
+		while( !kd_res_end( nearestPhotons ) ) {
+			data = kd_res_photonf( nearestPhotons, resPoint );
+			dist = glm::distance(glm::vec3(pos[0], pos[1], pos[2]), glm::vec3(resPoint[0], resPoint[1], resPoint[2]));
+			color.r += ((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.r;
+			color.g += ((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.g;
+			color.b += ((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.b;
 		}
 	}
-
-
-	//inShadow = false; 
-	if(closestPlane > -1 && !inShadow)
-	{
-		//plane closer than sphere
-		//normalVector = glm::normalize(f[closestPlane].normal-f[closestPlane].center);
-		return Shading(r, shadowRay.origin, f[closestPlane].normal, l, f[closestPlane].diffuse,
-				f[closestPlane].ambient,f[closestPlane].specular);
-	}
-	if(closestPlane > -1)
-	{
-		color.r = l->ambient.r * f[closestPlane].ambient.r;
-		color.g = l->ambient.g * f[closestPlane].ambient.g;
-		color.b = l->ambient.b * f[closestPlane].ambient.b;
-		//return CreateColor(1,1,1);
-		return color;
-	}
-
-	//IF SHADOWED, ONLY SHOW AMBIENT LIGHTING
-	if(closestSphere > -1 && !inShadow)
-	{
-
-		normalVector = glm::normalize(shadowRay.origin-(s[closestSphere].center));
-		return Shading(r, shadowRay.origin, normalVector, l, s[closestSphere].diffuse,
-				s[closestSphere].ambient,s[closestSphere].specular);
-	}
-	if(closestSphere > -1)
-	{
-		color.r = l->ambient.r * s[closestSphere].ambient.r;
-		color.g = l->ambient.g * s[closestSphere].ambient.g;
-		color.b = l->ambient.b * s[closestSphere].ambient.b;
-	}
+	
 	return color;
 }
 
@@ -706,3 +699,79 @@ __device__ float SphereRayIntersection(Sphere* s, Ray r) {
 	return -1;
 }
 
+
+__device__ float fastSqrt( float number )
+{
+        long i;
+        float x2, y;
+        const float threehalfs = 1.5F;
+ 
+        x2 = number * 0.5F;
+        y  = number;
+        i  = * ( long * ) &y;                       // evil floating point bit level hacking
+        i  = 0x5f3759df - ( i >> 1 );               // what the actual fuck?
+        y  = * ( float * ) &i;
+        y  = y * ( threehalfs - ( x2 * y * y ) );   // 1st iteration
+//      y  = y * ( threehalfs - ( x2 * y * y ) );   // 2nd iteration, this can be removed
+ 
+        return 1 / y;
+}
+
+__host__ __device__ Photon * kd_res_photonf(kdres *rset, float *pos)
+{
+	if(rset->riter) {
+		if(pos) {
+			int i;
+			for(i=0; i<3; i++) {
+				pos[i] = rset->riter->item->pos[i];
+			}
+		}
+		return (Photon *) rset->riter->item->data;
+	}
+	return 0;
+}
+
+__host__ __device__ int kd_res_end(struct kdres *rset)
+{
+	return rset->riter == 0;
+}
+
+__host__ __device__ kdres *kd_nearest_rangef(kdtree *kd, const float *pos, float range)
+{
+	static double sbuf[16];
+	double *bptr, *buf = 0;
+	kdres *res;
+
+	bptr = buf = sbuf;
+
+	int i = 3;
+	while(i-- > 0) {
+		*bptr++ = *pos++;
+	}
+
+	return kd_nearest_range(kd, buf, range);
+}
+
+__host__ __device__ kdres *kd_nearest_range(kdtree *kd, const double *pos, double range)
+{
+	int ret;
+	struct kdres *rset;
+
+	if(!(rset = malloc(sizeof *rset))) {
+		return 0;
+	}
+	if(!(rset->rlist = alloc_resnode())) {
+		free(rset);
+		return 0;
+	}
+	rset->rlist->next = 0;
+	rset->tree = kd;
+
+	if((ret = find_nearest(kd->root, pos, range, rset->rlist, 0, kd->dim)) == -1) {
+		kd_res_free(rset);
+		return 0;
+	}
+	rset->size = ret;
+	kd_res_rewind(rset);
+	return rset;
+}
