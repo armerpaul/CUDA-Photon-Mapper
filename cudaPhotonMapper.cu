@@ -15,7 +15,7 @@
 //#include "Image.h"
 #include "types.h"
 #include "cudaPhotonMapper.h"
-#include "kdtree.h"
+#include "kdtree-0.5.6/kdtree.h"
 
 // kdtree types from kd-tree code
 // These are needed for kdtree functions to run on CUDA
@@ -52,10 +52,10 @@ RectLight *light, *l_d;
 Plane * planes, *p_d;
 Sphere * spheres, *s_d;
 Photon * photonArray, *ph_d;
-kdtree * kdTree;
+kdtree * tree;
 struct kdres * kdresult;
-int numPhotons, kdTreeIncomplete = 1;
-float theta, stheta;
+int numPhotons, treeIncomplete = 1;
+float theta, stheta, *rayPoints, *points_d;
 
 Camera* CameraInit();
 PointLight* LightInit();
@@ -67,9 +67,9 @@ __host__ __device__ color_t CreateColor(float r, float g, float b);
 __global__ void CUDAPhotonTrace(Plane * f, RectLight *l, Sphere * s, Photon * position);
 __global__ void CUDARayTrace(Camera * cam, Plane * f, Sphere * s, kdtree * tree, uchar4 * pos);
 
-__device__ Photon * kd_res_photonf(struct kdres *rset, float *pos);
+__global__ void CUDARayTrace(Camera * cam, Plane * f, Sphere * s, kdtree *tree, float * points);
 
-__device__ color_t RayTrace(Ray r, Sphere* s, Plane* f, kdtree * tree);
+__device__ void RayTrace(Ray r, Sphere* s, Plane* f, kdtree * tree, float* p3);
 __device__ Photon PhotonTrace(Photon p, Sphere* s, Plane* f);
 __device__ color_t SphereShading(int sNdx, Ray r, Point p, Sphere* sphereList, PointLight* l);
 __device__ color_t Shading(Ray r, Point p, Point normalVector, PointLight* l, color_t diffuse, color_t ambient, color_t specular); 
@@ -90,20 +90,22 @@ static void HandleError( cudaError_t err, const char * file, int line)
  */
 extern "C" void setup_scene()
 {
-	kdTree = kd_create(3);
+	tree = kd_create(3);
 	HANDLE_ERROR( cudaDeviceSetCacheConfig(cudaFuncCachePreferL1));
 	camera = CameraInit();
 	light = new RectLight();
 	spheres = CreateSpheres();
 	planes = CreatePlanes(); 
 	numPhotons = light->width * PHOTON_DENSITY * light->height * PHOTON_DENSITY;
-	photonArray = (Photon *) malloc(sizeof(Photon) * numPhotons * NUM_BOUNCES); 
-	
+	photonArray = (Photon *) malloc(sizeof(Photon) * numPhotons * NUM_BOUNCES);
+	rayPoints = (float *) malloc(sizeof(float) * WINDOW_WIDTH * WINDOW_HEIGHT * 3);	
+		
 	HANDLE_ERROR( cudaMalloc((void**)&cam_d, sizeof(Camera)) );
 	HANDLE_ERROR( cudaMalloc(&p_d, sizeof(Plane)*NUM_PLANES) );
 	HANDLE_ERROR( cudaMalloc(&l_d, sizeof(RectLight)) );
 	HANDLE_ERROR( cudaMalloc(&s_d,  sizeof(Sphere)*NUM_SPHERES));
 	HANDLE_ERROR( cudaMalloc(&ph_d,  sizeof(Photon)*numPhotons*NUM_BOUNCES));
+    HANDLE_ERROR( cudaMalloc(&points_d, sizeof(float) * 3 * WINDOW_WIDTH * WINDOW_HEIGHT) );
 
 	HANDLE_ERROR( cudaMemcpy(l_d, light, sizeof(RectLight), cudaMemcpyHostToDevice) );
 	HANDLE_ERROR( cudaMemcpy(cam_d, camera,sizeof(Camera), cudaMemcpyHostToDevice) );
@@ -168,8 +170,8 @@ extern "C" void misc(unsigned char key)
 	switch(key){
 	case('q'):
 		{
-			// just for testing - resets kdTree
-			kdTreeIncomplete = 1;
+			// just for testing - resets tree
+			treeIncomplete = 1;
 			camera = CameraInit();
 			break;
 		}
@@ -286,7 +288,7 @@ extern "C" void misc(unsigned char key)
 /*
  * Function Wrapper for the kernel that shoots out photons
  */
-extern "C" void photonLaunch()
+extern "C" kdtree* photonLaunch()
 {
 	Point move;
 
@@ -311,169 +313,85 @@ extern "C" void photonLaunch()
 	cudaThreadSynchronize();
 
 	 
-	if (kdTreeIncomplete) {
+	if (treeIncomplete) {
 		HANDLE_ERROR( cudaMemcpy(photonArray, ph_d, sizeof(Photon)*numPhotons, cudaMemcpyDeviceToHost) );
 
-		kd_clear(kdTree);
+		kd_clear(tree);
 		for(int i=0; i < numPhotons; i++) {
-			assert(0 == kd_insert3(kdTree, photonArray[i].position.x, photonArray[i].position.y, photonArray[i].position.z, &photonArray[i]));
-		
-			//printf("%f %f %f to %f %f %f\n", photonArray[i].position.x, photonArray[i].position.y, photonArray[i].position.z,
-			//		photonArray[i].direction.x, photonArray[i].direction.y, photonArray[i].direction.z);
+			assert(0 == kd_insert3(tree, photonArray[i].position.x, photonArray[i].position.y, photonArray[i].position.z, &photonArray[i]));
 		}
-		kdTreeIncomplete = false;
-	} else {
-		// Might do something here...
-	}
-	
+		treeIncomplete = false;
+	} 
+	return tree;
 }
 
-extern "C" void renderScene(uchar4 *pos)
+extern "C" void renderScene(uchar4 *uch4, kdtree *tree)
 {
+    kdres * nearestPhotons;
+    float * resPoint;
+    float dist;
+    Photon * data;
+    
 	HANDLE_ERROR( cudaMemcpy(cam_d, camera,sizeof(Camera), cudaMemcpyHostToDevice) );
-	
+
 	dim3 gridSize((WINDOW_WIDTH + 15)/16, (WINDOW_HEIGHT + 15)/16);
 	dim3 blockSize(16,16);
-	CUDARayTrace<<< gridSize, blockSize  >>>(cam_d, p_d, s_d, kdTree, pos);
+	CUDARayTrace<<< gridSize, blockSize  >>>(cam_d, p_d, s_d, tree, points_d);
 	cudaThreadSynchronize();
+    
+    
+    // Copy "points" from gpu to cpu
+    HANDLE_ERROR( cudaMemcpy(rayPoints, points_d, sizeof(float) * 3 * WINDOW_WIDTH * WINDOW_HEIGHT, cudaMemcpyDeviceToHost) );
+    
+    // Hacky loop to avoid CUDA nonsense at the moment
+    for (int i = 0; i < WINDOW_HEIGHT; i++) {
+    	for (int j = 0; j < WINDOW_WIDTH; j++) {
+			// pull in light from surrounding photons
+			// THere are no shadow photons since we are looking at the photons in the specific radius of a ray intersection
+			//nearestPhotons = kd_nearest_rangef(tree, &rayPoints[i * 3], PHOTON_RANGE);
+		
+			printf("%08d\n", rayPoints);
+		
+			//uch4[i].x = 0;
+			//uch4[i].y = 0;
+			//uch4[i].z = 0;
+		
+		
+			//while( !kd_res_end( nearestPhotons ) ) {
+				//data = (Photon *) kd_res_itemf( nearestPhotons, resPoint );
+				//dist = glm::distance(glm::vec3(rayPoints[i * 3], rayPoints[i * 3 + 1], rayPoints[i * 3 + 2]), 
+				//								 glm::vec3(resPoint[0], resPoint[1], resPoint[2]));
+			
+				//printf("R: %0d\n", 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.r));
+				//printf("G: %0d\n", 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.g));
+				//printf("B: %0d\n", 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.b));
+			
+				//uch4[i].x += 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.r);
+				//uch4[i].y += 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.g);
+				//uch4[i].z += 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.b);
+			//}
+		
+		
+			//uch4[i * 3].w = 0xFF;
+		}
+    }
 	
-	
-}
-
-/*
- * Initializes camera at point (X,Y,Z)
- */
-Camera* CameraInit() {
-
-	Camera* c = new Camera();
-
-	c->eye = CreatePoint(0, 0, 0);//(X,Y,Z)
-	c->lookAt = CreatePoint(0, 0, SCREEN_DISTANCE);
-	c->lookUp = CreatePoint(0, 1, 0);
-	c->lookRight = CreatePoint(1, 0, 0);
-	c->theta_x = 0;
-	c->theta_y = 0;
-	return c;
-}
-
-/*
- * Initializes light at hardcoded (X,Y,Z) coordinates
- */
-PointLight* LightInit() {
-	PointLight* l = new PointLight();
-
-	l->ambient = CreateColor(0.2, 0.2, 0.2);
-	l->diffuse = CreateColor(0.6, 0.6, 0.6);
-	l->specular = CreateColor(0.4, 0.4, 0.4);
-
-	l->position = CreatePoint(50, 50, -400);
-
-	return l;
-}
-
-/*
- * Creates a point, for GLM Point has been defined as vec3
- */
-__host__  __device__ Point CreatePoint(float x, float y, float z) {
-	Point p;
-
-	p.x = x;
-	p.y = y;
-	p.z = z;
-
-	return p;
-}
-
-/*
- * Creates a color_t type color based on input values
- */
-__host__ __device__ color_t CreateColor(float r, float g, float b) {
-	color_t c;
-
-	c.r = r;
-	c.g = g;
-	c.b = b;
-	c.f = 1.0;
-
-	return c;
-}
-
-/*
- * Creates NUM_SPHERES # of Spheres, with randomly chosen values on color, location, and size
- */
-Sphere* CreateSpheres() {
-	Sphere* spheres = new Sphere[NUM_SPHERES]();
-	float randr, randg, randb;
-	int num = 0;
-	while (num < NUM_SPHERES-1) {
-		randr = (rand()%1000) /1000.f ;
-		randg = (rand()%1000) /1000.f ;
-		randb = (rand()%1000) /1000.f ;
-		spheres[num].radius = 80. - rand() % 60;
-		spheres[num].center = CreatePoint(2400. - rand() % 4800,
-				700 - rand() % 1100,
-				-0. - rand() %4800);
-		spheres[num].ambient = CreateColor(randr, randg, randb);
-		spheres[num].diffuse = CreateColor(randr, randg, randb);
-		spheres[num].specular = CreateColor(1., 1., 1.);
-		num++;
-	}
-
-
-	spheres[NUM_SPHERES-1].radius=5;
-	spheres[NUM_SPHERES-1].center=light->position;
-	spheres[NUM_SPHERES-1].ambient=CreateColor(1,1,1);
-	spheres[NUM_SPHERES-1].diffuse=CreateColor(1,1,1);
-	spheres[NUM_SPHERES-1].specular=CreateColor(1,1,1);
-
-	return spheres;
-}
-
-/*
- * Creates NUM_PLANES NUMBER OF PLANES, CURRENTLY THIS IS HARDCODED
- */
-Plane* CreatePlanes() {
-	Plane* planes = new Plane[NUM_PLANES]();
-	planes[0].normal = CreatePoint(0,1,0);
-	planes[0].center = CreatePoint(0,-500,0);
-	planes[0].ambient = planes[0].diffuse = planes[0].specular = CreateColor(1,1,1);
-
-	planes[1].normal = CreatePoint(0,-1,0) ;
-	planes[1].center = CreatePoint(0,800,0);
-	planes[1].ambient = planes[1].diffuse = planes[1].specular = CreateColor(1,1,1);
-
-	planes[2].normal = CreatePoint(0,0, 1) ;
-	planes[2].center = CreatePoint(0,0,-5000);
-	planes[2].ambient = planes[2].diffuse = planes[2].specular = CreateColor(1,1,1);
-
-	planes[3].normal = CreatePoint(1,0,0) ;
-	planes[3].center = CreatePoint(-2400,0,0);
-	planes[3].ambient = planes[3].diffuse = planes[3].specular = CreateColor(1,1,1);
-
-	planes[4].normal = CreatePoint(-1,0,0) ;
-	planes[4].center = CreatePoint(2400,0, 0);
-	planes[4].ambient = planes[4].diffuse = planes[4].specular = CreateColor(1,1,1);
-
-	planes[5].normal = CreatePoint(0,0,-1) ;
-	planes[5].center = CreatePoint(0,0, 1000);
-	planes[5].ambient = planes[5].diffuse = planes[5].specular = CreateColor(1,1,1);
-
-	return planes;
 }
 
 
 /*
  * CUDA global function which performs ray tracing. Responsible for initializing and writing to output vector
  */
-__global__ void CUDARayTrace(Camera * cam, Plane * f, Sphere * s, kdtree *tree, uchar4 * pos)
+__global__ void CUDARayTrace(Camera * cam, Plane * f, Sphere * s, kdtree *tree, float * points)
 {
 	float tanVal = tan(FOV/2);
 
 	//CALCULATE ABSOLUTE ROW,COL
 	int row = blockIdx.y * blockDim.y + threadIdx.y;
 	int col = blockIdx.x * blockDim.x + threadIdx.x;
-	color_t returnColor;
-	Ray r;
+	//color_t returnColor;
+	float * rayPoint;
+    Ray r;
 
 	//BOUNDARY CHECK
 	if(row >= WINDOW_HEIGHT || col >= WINDOW_WIDTH)
@@ -490,24 +408,28 @@ __global__ void CUDARayTrace(Camera * cam, Plane * f, Sphere * s, kdtree *tree, 
 	//r.direction.y += tanVal - (2 * tanVal / WINDOW_HEIGHT) * row;
 	//r.direction.x += -1 * WINDOW_WIDTH / WINDOW_HEIGHT * tanVal + (2 * tanVal / WINDOW_HEIGHT) * col;
 
-	//RAY TRACE
-	returnColor = RayTrace(r, s, f, tree);
-
 	//CALC OUTPUT INDEX
 	int index = row *WINDOW_WIDTH + col;
 
+	points[index] = 0xFF;
+
+    //RAY TRACE
+	//RayTrace(r, s, f, tree, &points[index]);
+    
 	//PLACE DATA IN INDEX
-	pos[index].x = 0xFF * returnColor.r;
-	pos[index].y = 0xFF * returnColor.g;
-	pos[index].z = 0xFF * returnColor.b;
-	pos[index].w = 0xFF * returnColor.f;
+	//pos[index].x = 0xFF * returnColor.r;
+	//pos[index].y = 0xFF * returnColor.g;
+	//pos[index].z = 0xFF * returnColor.b;
+	//pos[index].w = 0xFF * returnColor.f;
 
 }
 
 /*
  * Performs Ray tracing over all spheres for any ray r
+ * Returns a point at the moment.
+ * @TODO - make it return a color_t by looking into the kd-tree. 
  */
-__device__ color_t RayTrace(Ray r, Sphere* s, Plane* f, kdtree * tree) {
+__device__ void RayTrace(Ray r, Sphere* s, Plane* f, kdtree * tree, float* p3) {
 	color_t color = CreateColor(0, 0, 0); 
 	kdres * nearestPhotons;
 	float t, smallest;
@@ -536,10 +458,15 @@ __device__ color_t RayTrace(Ray r, Sphere* s, Plane* f, kdtree * tree) {
 		i++;
 	}
 
+    p3[0] = r.direction.x * smallest;
+    p3[1] = r.direction.y * smallest;
+    p3[2] = r.direction.z * smallest;
+    
 	//SETUP FOR SHADOW CALCULATIONS
-	i = 0;
+	/*
+    i = 0;
 	Ray shadowRay;
-
+    
 	if(closestPlane > -1 || closestSphere > -1)
 	{	
 		float resPoint[3];
@@ -559,6 +486,7 @@ __device__ color_t RayTrace(Ray r, Sphere* s, Plane* f, kdtree * tree) {
 	}
 	
 	return color;
+    */
 }
 
 
@@ -699,7 +627,126 @@ __device__ float SphereRayIntersection(Sphere* s, Ray r) {
 	return -1;
 }
 
+/*
+ * Creates NUM_SPHERES # of Spheres, with randomly chosen values on color, location, and size
+ */
+Sphere* CreateSpheres() {
+	Sphere* spheres = new Sphere[NUM_SPHERES]();
+	float randr, randg, randb;
+	int num = 0;
+	while (num < NUM_SPHERES-1) {
+		randr = (rand()%1000) /1000.f ;
+		randg = (rand()%1000) /1000.f ;
+		randb = (rand()%1000) /1000.f ;
+		spheres[num].radius = 80. - rand() % 60;
+		spheres[num].center = CreatePoint(2400. - rand() % 4800,
+                                          700 - rand() % 1100,
+                                          -0. - rand() %4800);
+		spheres[num].ambient = CreateColor(randr, randg, randb);
+		spheres[num].diffuse = CreateColor(randr, randg, randb);
+		spheres[num].specular = CreateColor(1., 1., 1.);
+		num++;
+	}
+    
+    
+	spheres[NUM_SPHERES-1].radius=5;
+	spheres[NUM_SPHERES-1].center=light->position;
+	spheres[NUM_SPHERES-1].ambient=CreateColor(1,1,1);
+	spheres[NUM_SPHERES-1].diffuse=CreateColor(1,1,1);
+	spheres[NUM_SPHERES-1].specular=CreateColor(1,1,1);
+    
+	return spheres;
+}
 
+/*
+ * Creates NUM_PLANES NUMBER OF PLANES, CURRENTLY THIS IS HARDCODED
+ */
+Plane* CreatePlanes() {
+	Plane* planes = new Plane[NUM_PLANES]();
+	planes[0].normal = CreatePoint(0,1,0);
+	planes[0].center = CreatePoint(0,-500,0);
+	planes[0].ambient = planes[0].diffuse = planes[0].specular = CreateColor(1,1,1);
+    
+	planes[1].normal = CreatePoint(0,-1,0) ;
+	planes[1].center = CreatePoint(0,800,0);
+	planes[1].ambient = planes[1].diffuse = planes[1].specular = CreateColor(1,1,1);
+    
+	planes[2].normal = CreatePoint(0,0, 1) ;
+	planes[2].center = CreatePoint(0,0,-5000);
+	planes[2].ambient = planes[2].diffuse = planes[2].specular = CreateColor(1,1,1);
+    
+	planes[3].normal = CreatePoint(1,0,0) ;
+	planes[3].center = CreatePoint(-2400,0,0);
+	planes[3].ambient = planes[3].diffuse = planes[3].specular = CreateColor(1,1,1);
+    
+	planes[4].normal = CreatePoint(-1,0,0) ;
+	planes[4].center = CreatePoint(2400,0, 0);
+	planes[4].ambient = planes[4].diffuse = planes[4].specular = CreateColor(1,1,1);
+    
+	return planes;
+}
+
+/*
+ * Initializes camera at point (X,Y,Z)
+ */
+Camera* CameraInit() {
+    
+	Camera* c = new Camera();
+    
+	c->eye = CreatePoint(0, 0, 0);//(X,Y,Z)
+	c->lookAt = CreatePoint(0, 0, SCREEN_DISTANCE);
+	c->lookUp = CreatePoint(0, 1, 0);
+	c->lookRight = CreatePoint(1, 0, 0);
+	c->theta_x = 0;
+	c->theta_y = 0;
+	return c;
+}
+
+/*
+ * Initializes light at hardcoded (X,Y,Z) coordinates
+ */
+PointLight* LightInit() {
+	PointLight* l = new PointLight();
+    
+	l->ambient = CreateColor(0.2, 0.2, 0.2);
+	l->diffuse = CreateColor(0.6, 0.6, 0.6);
+	l->specular = CreateColor(0.4, 0.4, 0.4);
+    
+	l->position = CreatePoint(50, 50, -400);
+    
+	return l;
+}
+
+/*
+ * Creates a point, for GLM Point has been defined as vec3
+ */
+__host__  __device__ Point CreatePoint(float x, float y, float z) {
+	Point p;
+    
+	p.x = x;
+	p.y = y;
+	p.z = z;
+    
+	return p;
+}
+
+/*
+ * Creates a color_t type color based on input values
+ */
+__host__ __device__ color_t CreateColor(float r, float g, float b) {
+	color_t c;
+    
+	c.r = r;
+	c.g = g;
+	c.b = b;
+	c.f = 1.0;
+    
+	return c;
+}
+
+/*
+ * Thank you wikipedia for this amazing fast function, and the lol comments.
+ */
 __device__ float fastSqrt( float number )
 {
         long i;

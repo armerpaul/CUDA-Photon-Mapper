@@ -30,8 +30,8 @@
 #define WINDOW_WIDTH 1024
 #define WINDOW_HEIGHT 1024
 #define SCREEN_DISTANCE -1
-#define NUM_SPHERES 100
-#define NUM_PLANES 6 
+#define NUM_SPHERES 3
+#define NUM_PLANES 5
 
 #define PHOTON_DENSITY 3
 #define PHOTON_RANGE 5.f

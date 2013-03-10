@@ -6,10 +6,10 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
-#include <cuda_runtime.h>
-#include <cuda.h>
-#include <cuda_runtime_api.h>
-#include <cuda_gl_interop.h>
+//#include <cuda_runtime.h>
+//#include <cuda.h>
+//#include <cuda_runtime_api.h>
+//#include <cuda_gl_interop.h>
 
  
 // external variables

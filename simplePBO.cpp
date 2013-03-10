@@ -2,6 +2,7 @@
 // includes
 
 #include "cudaPhotonMapper.h"
+#include "kdtree-0.5.6/kdtree.h"
 
 #include <stdio.h>
 #include <stdint.h>
@@ -15,8 +16,9 @@
 // external variables
 extern float animTime;
  
-extern "C" void photonLaunch();
+extern "C" kdtree* photonLaunch();
 extern "C" void setup_scene(); 
+extern "C" void renderScene(uchar4 *pos, kdtree *tree);
 
 // variables
 GLuint pbo=0;
@@ -103,9 +105,9 @@ void runCuda()
   // should not use this buffer
   cudaGLMapBufferObject((void**)&dptr, pbo);
  
-  // execute the kernel
-  photonLaunch();
-  renderScene(pbo);
+  // execute the kernel 
+  //photonLaunch();
+  renderScene(dptr, photonLaunch());
  
   // unmap buffer object
   cudaGLUnmapBufferObject(pbo);
