@@ -1,9 +1,6 @@
 // simplePBO.cpp (Rob Farber)
+#include "cudaRayTrace.h"
 // includes
-
-#include "cudaPhotonMapper.h"
-#include "kdtree-0.5.6/kdtree.h"
-
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -11,14 +8,18 @@
 #include <cuda.h>
 #include <cuda_runtime_api.h>
 #include <cuda_gl_interop.h>
-
  
 // external variables
 extern float animTime;
+extern unsigned int window_width;
+extern unsigned int window_height;
  
-extern "C" kdtree* photonLaunch();
+// constants (the following should be a const in a header file)
+unsigned int image_width = WINDOW_WIDTH;
+unsigned int image_height = WINDOW_HEIGHT;
+ 
+extern "C" void launch_kernel(void* pos, unsigned int, unsigned int, float);
 extern "C" void setup_scene(); 
-extern "C" void renderScene(uchar4 *pos, kdtree *tree);
 
 // variables
 GLuint pbo=0;
@@ -29,7 +30,7 @@ void createPBO(GLuint* pbo)
  
   if (pbo) {
     // set up vertex data parameter
-    int num_texels = WINDOW_WIDTH * WINDOW_HEIGHT;
+    int num_texels = image_width * image_height;
     int num_values = num_texels * 4;
     int size_tex_data = sizeof(GLubyte) * num_values;
      
@@ -69,7 +70,7 @@ void createTexture(GLuint* textureID, unsigned int size_x, unsigned int size_y)
  
   // Allocate the texture memory. The last parameter is NULL since we only
   // want to allocate memory, not initialize it
-  glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, WINDOW_WIDTH, WINDOW_HEIGHT, 0,
+  glTexImage2D( GL_TEXTURE_2D, 0, GL_RGBA8, image_width, image_height, 0,
             GL_BGRA,GL_UNSIGNED_BYTE, NULL);
  
   // Must set the filter mode, GL_LINEAR enables interpolation when scaling
@@ -105,9 +106,8 @@ void runCuda()
   // should not use this buffer
   cudaGLMapBufferObject((void**)&dptr, pbo);
  
-  // execute the kernel 
-  //photonLaunch();
-  renderScene(dptr, photonLaunch());
+  // execute the kernel
+  launch_kernel(dptr, image_width, image_height, animTime);
  
   // unmap buffer object
   cudaGLUnmapBufferObject(pbo);
@@ -131,7 +131,7 @@ void initCuda()
   setup_scene(); 
   
   createPBO(&pbo);
-  createTexture(&textureID,WINDOW_WIDTH,WINDOW_HEIGHT);
+  createTexture(&textureID,image_width,image_height);
  
   // Clean up on program exit
   atexit(cleanupCuda);

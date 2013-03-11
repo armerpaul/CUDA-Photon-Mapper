@@ -1,14 +1,9 @@
 // simpleGLmain.cpp (Rob Farber)
-
+#include "cudaRayTrace.h"
 // includes
-
-#include "cudaPhotonMapper.h"
-
 #include <sys/time.h>
 #include <stdio.h>
 #include <unistd.h>
-
-
 
 // The user must create the following routines:
 // CUDA methods
@@ -21,6 +16,10 @@ extern void display();
 extern void keyboard(unsigned char key, int x, int y);
 extern void mouse(int button, int state, int x, int y);
 extern void motion(int x, int y);
+
+// GLUT specific variables
+unsigned int window_width = WINDOW_WIDTH;
+unsigned int window_height = WINDOW_HEIGHT;
 
 
 // Forward declarations of GL functionality
@@ -83,14 +82,14 @@ bool initGL(int argc, char **argv)
    //Steps 1-2: create a window and GL context (also register callbacks)
    glutInit(&argc, argv);
    glutInitDisplayMode(GLUT_RGBA | GLUT_DOUBLE);
-   glutInitWindowSize(WINDOW_WIDTH, WINDOW_HEIGHT);
+   glutInitWindowSize(window_width, window_height);
    glutCreateWindow("Cuda GL Interop Demo (adapted from NVIDIA's simpleGL");
    glutDisplayFunc(fpsDisplay);
    glutKeyboardFunc(keyboard);
    glutMotionFunc(motion);
 
    // Step 3: Setup our viewport and viewing modes
-   glViewport(0, 0, WINDOW_WIDTH, WINDOW_HEIGHT);
+   glViewport(0, 0, window_width, window_height);
 
    glClearColor(0.0, 0.0, 0.0, 1.0);
    glDisable(GL_DEPTH_TEST);

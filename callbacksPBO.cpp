@@ -1,8 +1,8 @@
 //callbacksPBO.cpp (Rob Farber)
 
+#include "cudaRayTrace.h"
 #include <stdio.h>
 #include <stdlib.h>
-#include "cudaPhotonMapper.h"
 
 // variables for keyboard control
 int animFlag=1;
@@ -12,6 +12,8 @@ float animInc=0.1f;
 //external variables
 extern GLuint pbo;
 extern GLuint textureID;
+extern unsigned int image_width;
+extern unsigned int image_height;
 extern void moveIn();
 extern void moveOut();
 extern void moveUp();
@@ -43,7 +45,7 @@ void display()
    // GL_BGRA and GL_UNSIGNED_INT. This is a fast-path combination
 
    // Note: NULL indicates the data resides in device memory
-   glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, WINDOW_WIDTH, WINDOW_HEIGHT,
+   glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, image_width, image_height,
          GL_RGBA, GL_UNSIGNED_BYTE, NULL);
 
 
@@ -109,5 +111,4 @@ void mouse(int button, int state, int x, int y)
 
 void motion(int x, int y)
 {
-	printf("x: %d, y: %d\n", x, y);
 }
