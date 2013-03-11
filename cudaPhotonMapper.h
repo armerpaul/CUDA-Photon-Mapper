@@ -34,7 +34,7 @@
 #define NUM_PLANES 5
 
 #define PHOTON_DENSITY 3
-#define PHOTON_RANGE 5.f
+#define PHOTON_RANGE 50.f
 #define NUM_BOUNCES 3
 
 #define AMBIENT .2

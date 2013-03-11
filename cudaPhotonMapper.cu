@@ -69,12 +69,12 @@ __global__ void CUDARayTrace(Camera * cam, Plane * f, Sphere * s, kdtree * tree,
 
 __global__ void CUDARayTrace(Camera * cam, Plane * f, Sphere * s, kdtree *tree, float * points);
 
-__device__ void RayTrace(Ray r, Sphere* s, Plane* f, kdtree * tree, float* p3);
+__host__ __device__ void RayTrace(Ray r, Sphere* s, Plane* f, kdtree * tree, float* p3);
 __device__ Photon PhotonTrace(Photon p, Sphere* s, Plane* f);
 __device__ color_t SphereShading(int sNdx, Ray r, Point p, Sphere* sphereList, PointLight* l);
 __device__ color_t Shading(Ray r, Point p, Point normalVector, PointLight* l, color_t diffuse, color_t ambient, color_t specular); 
-__device__ float SphereRayIntersection(Sphere* s, Ray r);
-__device__ float PlaneRayIntersection(Plane* s, Ray r);
+__host__ __device__ float SphereRayIntersection(Sphere* s, Ray r);
+__host__ __device__ float PlaneRayIntersection(Plane* s, Ray r);
 
 static void HandleError( cudaError_t err, const char * file, int line)
 {
@@ -97,15 +97,15 @@ extern "C" void setup_scene()
 	spheres = CreateSpheres();
 	planes = CreatePlanes(); 
 	numPhotons = light->width * PHOTON_DENSITY * light->height * PHOTON_DENSITY;
-	photonArray = (Photon *) malloc(sizeof(Photon) * numPhotons * NUM_BOUNCES);
-	rayPoints = (float *) malloc(sizeof(float) * WINDOW_WIDTH * WINDOW_HEIGHT * 3);	
+	photonArray = new Photon[numPhotons * NUM_BOUNCES]; //(Photon *) malloc(sizeof(Photon) * numPhotons * NUM_BOUNCES);
+	//rayPoints = (float *) malloc(sizeof(float) * WINDOW_WIDTH * WINDOW_HEIGHT * 3);	
 		
 	HANDLE_ERROR( cudaMalloc((void**)&cam_d, sizeof(Camera)) );
 	HANDLE_ERROR( cudaMalloc(&p_d, sizeof(Plane)*NUM_PLANES) );
 	HANDLE_ERROR( cudaMalloc(&l_d, sizeof(RectLight)) );
 	HANDLE_ERROR( cudaMalloc(&s_d,  sizeof(Sphere)*NUM_SPHERES));
 	HANDLE_ERROR( cudaMalloc(&ph_d,  sizeof(Photon)*numPhotons*NUM_BOUNCES));
-    HANDLE_ERROR( cudaMalloc(&points_d, sizeof(float) * 3 * WINDOW_WIDTH * WINDOW_HEIGHT) );
+    //HANDLE_ERROR( cudaMalloc(&points_d, sizeof(float) * 3 * WINDOW_WIDTH * WINDOW_HEIGHT) );
 
 	HANDLE_ERROR( cudaMemcpy(l_d, light, sizeof(RectLight), cudaMemcpyHostToDevice) );
 	HANDLE_ERROR( cudaMemcpy(cam_d, camera,sizeof(Camera), cudaMemcpyHostToDevice) );
@@ -114,6 +114,395 @@ extern "C" void setup_scene()
 	
 	theta = 0;
 	stheta = 0;
+}
+
+/*
+ * Function Wrapper for the kernel that shoots out photons
+ */
+extern "C" kdtree* photonLaunch()
+{
+	Point move;
+
+	//light->position.x -= 2 *sin(theta += .01);	
+
+	//spheres[NUM_SPHERES-1].radius=5;
+	//spheres[NUM_SPHERES-1].center=light->position;
+	//spheres[NUM_SPHERES-1].ambient=CreateColor(1,0,0);
+	//spheres[NUM_SPHERES-1].diffuse=CreateColor(1,1,1);
+	//spheres[NUM_SPHERES-1].specular=CreateColor(1,1,1);
+
+	HANDLE_ERROR( cudaMemcpy(l_d, light, sizeof(RectLight), cudaMemcpyHostToDevice) );
+
+	HANDLE_ERROR( cudaMemcpy(s_d, spheres,sizeof(Sphere)*NUM_SPHERES, cudaMemcpyHostToDevice) );
+
+	if (treeIncomplete) {
+		HANDLE_ERROR( cudaMemcpy(ph_d, photonArray, sizeof(Photon)*numPhotons*NUM_BOUNCES, cudaMemcpyHostToDevice) );
+	}
+	
+	// The Kernel Call
+	dim3 gridSize((light->width * PHOTON_DENSITY + 15)/16, (light->height * PHOTON_DENSITY + 15)/16);
+	dim3 blockSize(16,16);
+	CUDAPhotonTrace<<< gridSize, blockSize  >>>(p_d, l_d, s_d, ph_d);
+	cudaThreadSynchronize();
+
+	 
+	if (treeIncomplete) {
+		HANDLE_ERROR( cudaMemcpy(photonArray, ph_d, sizeof(Photon)*numPhotons, cudaMemcpyDeviceToHost) );
+
+		kd_clear(tree);
+		for(int i=0; i < numPhotons; i++) {
+			assert(0 == kd_insert3(tree, photonArray[i].position.x, photonArray[i].position.y, photonArray[i].position.z, &photonArray[i]));
+		}
+		treeIncomplete = false;
+	} 
+	return tree;
+}
+
+
+extern "C" void renderScene(uchar4 uch4[], kdtree *tree) 
+{
+	kdres * nearestPhotons;
+    float * samplePoint = (float*) calloc(sizeof(float), 3), * resultPoint = (float*) malloc(sizeof(float) * 3);
+    float dist;
+    Photon * data;
+
+	for (int i = 0; i < WINDOW_HEIGHT; i++) {
+		for (int j = 0; j < WINDOW_WIDTH; j++) {
+			printf("i: %4d, j: %4d  ", i, j);
+			printf("uch4: %d, tree: %d\n", uch4, tree);
+			
+			nearestPhotons = kd_nearestf(tree, samplePoint);
+    		while( !kd_res_end( nearestPhotons ) ) {
+				data = (Photon *) kd_res_itemf( nearestPhotons, resultPoint );
+				dist = glm::distance(glm::vec3(samplePoint[0], samplePoint[1], samplePoint[2]), 
+												 glm::vec3(resultPoint[0], resultPoint[1], resultPoint[2]));
+			
+				printf("
+				printf("R: %0d\n", 0xFF * data->color.r);//(((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.r));
+				printf("G: %0d\n", 0xFF * data->color.g);//(((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.g));
+				printf("B: %0d\n", 0xFF * data->color.b);//(((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.b));
+			
+				//uch4[i].x = 0xFF;// * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.r);
+				//uch4[i].y = 0xFF;// * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.g);
+				//uch4[i].z = 0xFF;// * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.b);
+			}
+			kd_res_free(nearestPhotons);
+		}
+	}
+}
+
+extern "C" void renderScene2(uchar4 *uch4, kdtree *tree)
+{
+    kdres * nearestPhotons;
+    float * samplePoint = (float*) malloc(sizeof(float) * 3), * resultPoint = (float*) malloc(sizeof(float) * 3);
+    float dist;
+    Photon * data;
+    
+	//HANDLE_ERROR( cudaMemcpy(cam_d, camera,sizeof(Camera), cudaMemcpyHostToDevice) );
+
+	//dim3 gridSize((WINDOW_WIDTH + 15)/16, (WINDOW_HEIGHT + 15)/16);
+	//dim3 blockSize(16,16);
+	//CUDARayTrace(cam_d, p_d, s_d, tree, points_d);
+	//cudaThreadSynchronize();
+    
+    
+    // Copy "points" from gpu to cpu
+    //HANDLE_ERROR( cudaMemcpy(rayPoints, points_d, sizeof(float) * 3 * WINDOW_WIDTH * WINDOW_HEIGHT, cudaMemcpyDeviceToHost) );
+    
+    // Hacky loop to avoid CUDA nonsense at the moment
+    for (int i = 0; i < WINDOW_HEIGHT; i++) {
+    	for (int j = 0; j < WINDOW_WIDTH; j++) {
+    	
+    		float tanVal = tan(FOV/2);
+
+			//CALCULATE ABSOLUTE ROW,COL
+			int index = i * WINDOW_HEIGHT + j;
+			float * rayPoint;
+			Ray r;
+
+			float rvaly = tanVal - (2 * tanVal / WINDOW_HEIGHT) * i;
+			float rvalx = -1 * WINDOW_WIDTH / WINDOW_HEIGHT * tanVal + (2 * tanVal / WINDOW_HEIGHT) * j;
+			//INIT RAY VALUES
+			r.origin = camera->eye;
+			r.direction = camera->lookAt;
+			r.direction += (rvalx * camera->lookRight);
+			r.direction += (rvaly * camera->lookUp);
+			r.direction = glm::normalize(r.direction);
+
+			//printf("%d\n", uch4[0]);
+			//uch4[index].x = 0xFF;
+
+			
+			RayTrace(r, spheres, planes, tree, samplePoint);
+
+    		nearestPhotons = kd_nearest_rangef(tree, samplePoint, PHOTON_RANGE);
+    		while( !kd_res_end( nearestPhotons ) ) {
+				data = (Photon *) kd_res_itemf( nearestPhotons, resultPoint );
+				dist = glm::distance(glm::vec3(samplePoint[0], samplePoint[1], samplePoint[2]), 
+												 glm::vec3(resultPoint[0], resultPoint[1], resultPoint[2]));
+			
+				printf("R: %0d\n", 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.r));
+				printf("G: %0d\n", 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.g));
+				printf("B: %0d\n", 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.b));
+			
+				//uch4[i].x = 0xFF;// * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.r);
+				//uch4[i].y = 0xFF;// * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.g);
+				//uch4[i].z = 0xFF;// * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.b);
+			}
+			//uch4[i * 3].w = 0xFF;
+			
+		}
+    }
+	
+}
+
+
+/*
+ * CUDA global function which performs ray tracing. Responsible for initializing and writing to output vector
+ */
+__global__ void CUDARayTrace(Camera * cam, Plane * f, Sphere * s, kdtree *tree, float * points)
+{
+	float tanVal = tan(FOV/2);
+
+	//CALCULATE ABSOLUTE ROW,COL
+	int row = blockIdx.y * blockDim.y + threadIdx.y;
+	int col = blockIdx.x * blockDim.x + threadIdx.x;
+	//color_t returnColor;
+	float * rayPoint;
+    Ray r;
+
+	//BOUNDARY CHECK
+	if(row >= WINDOW_HEIGHT || col >= WINDOW_WIDTH)
+		return;
+
+	float rvaly = tanVal - (2 * tanVal / WINDOW_HEIGHT) * row;
+	float rvalx = -1 * WINDOW_WIDTH / WINDOW_HEIGHT * tanVal + (2 * tanVal / WINDOW_HEIGHT) * col;
+	//INIT RAY VALUES
+	r.origin = cam->eye;
+	r.direction = cam->lookAt;
+	r.direction += (rvalx * cam->lookRight);
+	r.direction += (rvaly * cam->lookUp);
+	r.direction = glm::normalize(r.direction);
+	//r.direction.y += tanVal - (2 * tanVal / WINDOW_HEIGHT) * row;
+	//r.direction.x += -1 * WINDOW_WIDTH / WINDOW_HEIGHT * tanVal + (2 * tanVal / WINDOW_HEIGHT) * col;
+
+	//CALC OUTPUT INDEX
+	int index = row *WINDOW_WIDTH + col;
+
+	points[index] = 0xFF;
+
+    //RAY TRACE
+	//RayTrace(r, s, f, tree, &points[index]);
+    
+	//PLACE DATA IN INDEX
+	//pos[index].x = 0xFF * returnColor.r;
+	//pos[index].y = 0xFF * returnColor.g;
+	//pos[index].z = 0xFF * returnColor.b;
+	//pos[index].w = 0xFF * returnColor.f;
+
+}
+
+/*
+ * Performs Ray tracing over all spheres for any ray r
+ * Returns a point at the moment.
+ * @TODO - make it return a color_t by looking into the kd-tree. 
+ */
+__host__ __device__ void RayTrace(Ray r, Sphere* s, Plane* f, kdtree * tree, float* p3) {
+	color_t color = CreateColor(0, 0, 0); 
+	kdres * nearestPhotons;
+	float t, smallest;
+	int i = 0, closestSphere = -1, closestPlane = -1;
+	//r.direction += r.origin; //Set back to normal
+	Point normalVector;
+	//FIND CLOSEST SPHERE ALONG RAY R
+	while (i < NUM_SPHERES) {
+		t = SphereRayIntersection(s + i, r);
+
+		if (t > 0 && (closestSphere < 0 || t < smallest)) {
+			smallest = t;
+			closestSphere = i;
+		}
+		i++;
+	}
+	//r.direction -= r.origin;
+	i=0;
+	while (i < NUM_PLANES) {
+		t = PlaneRayIntersection(f + i, r);
+		if (t > 0 && ( (closestSphere < 0 && closestPlane < 0) || t < smallest)) {//POSSIBLE LOGIC FIX CLOSESTSPHERE >1
+			smallest = t;
+			closestSphere = -1;
+			closestPlane = i;
+		}
+		i++;
+	}
+
+    p3[0] = r.direction.x * smallest;
+    p3[1] = r.direction.y * smallest;
+    p3[2] = r.direction.z * smallest;
+    
+	//SETUP FOR SHADOW CALCULATIONS
+	/*
+    i = 0;
+	Ray shadowRay;
+    
+	if(closestPlane > -1 || closestSphere > -1)
+	{	
+		float resPoint[3];
+		float pos[] = {r.direction.x * smallest, 
+				r.direction.y * smallest,
+				 r.direction.z * smallest};
+		nearestPhotons = kd_nearest_rangef(tree, pos, PHOTON_RANGE);
+		float dist;
+		Photon * data;
+		while( !kd_res_end( nearestPhotons ) ) {
+			data = kd_res_photonf( nearestPhotons, resPoint );
+			dist = glm::distance(glm::vec3(pos[0], pos[1], pos[2]), glm::vec3(resPoint[0], resPoint[1], resPoint[2]));
+			color.r += ((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.r;
+			color.g += ((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.g;
+			color.b += ((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.b;
+		}
+	}
+	
+	return color;
+    */
+}
+
+
+/*
+ * CUDA global function which performs photon mappning. Responsible for initializing and writing to output vector
+ */
+__global__ void CUDAPhotonTrace(Plane * f, RectLight * l, Sphere * s, Photon * pos)
+{
+	//CALCULATE ABSOLUTE ROW,COL
+	int row = blockIdx.y * blockDim.y + threadIdx.y;
+	int col = blockIdx.x * blockDim.x + threadIdx.x;
+	Photon ph = Photon();
+
+	//BOUNDARY CHECK
+	if(row >= l->height * PHOTON_DENSITY || col >= l->width * PHOTON_DENSITY)
+		return;
+
+	//INIT PHOTON VALUES - Doesn't support a moving light yet, makes assumptions about position
+	ph.position = l->position;
+	ph.position.x += (float)row / (float)(l->height);
+	ph.position.z += (float)col / (float)(l->width);
+
+	ph.direction.x = l->normal.x + (float)row / (float)l->height; //just in hopes that something interesting happens
+	ph.direction.y = l->normal.y; // we'll just keep this one the same since rand ain't workin'
+	ph.direction.z = l->normal.z + (float)col / (float)l->width;
+	ph.direction = glm::normalize(ph.direction);
+
+	//CALC OUTPUT INDEX
+	int index = row * l->height * PHOTON_DENSITY + col;
+
+	//PLACE PHOTON IN INDEX
+	pos[index] = PhotonTrace(ph, s, f);
+
+}
+
+
+
+/*
+ * Performs Ray tracing over all spheres for any ray r
+ */
+__device__ Photon PhotonTrace(Photon ph, Sphere* s, Plane* f) {
+	
+	color_t color = CreateColor(0, 0, 0); 
+	float t, smallest;
+	int i = 0, closestSphere = -1, closestPlane = -1;
+	//r.direction += r.origin; //Set back to normal
+	Point normalVector;
+	Ray r;
+	r.origin = ph.position;
+	r.direction = ph.direction;
+	//FIND CLOSEST SPHERE ALONG RAY R
+	while (i < NUM_SPHERES) {
+		t = SphereRayIntersection(s + i, r);
+
+		if (t > 0 && (closestSphere < 0 || t < smallest)) {
+			smallest = t;
+			closestSphere = i;
+		}
+		i++;
+	}
+	//r.direction -= r.origin;
+	i=0;
+	while (i < NUM_PLANES) {
+		t = PlaneRayIntersection(f + i, r);
+		if (t > 0 && ( (closestSphere < 0 && closestPlane < 0) || t < smallest)) {//POSSIBLE LOGIC FIX CLOSESTSPHERE >1
+			smallest = t;
+			closestSphere = -1;
+			closestPlane = i;
+		}
+		i++;
+	}
+
+	if (closestSphere > -1) {
+		ph.position.x += smallest * ph.direction.x;
+		ph.position.y += smallest * ph.direction.y;
+		ph.position.z += smallest * ph.direction.z;
+
+		ph.color = s[closestSphere].ambient;
+	} else if (closestPlane > -1) {
+		ph.position.x += smallest * ph.direction.x;
+		ph.position.y += smallest * ph.direction.y;
+		ph.position.z += smallest * ph.direction.z;	
+		ph.color = f[closestPlane].ambient;
+	}
+
+	return ph;
+
+}
+
+/*
+ * Determines distance of intersection of Ray with Plane, -1 returned if no intersection
+ */
+__host__ __device__ float PlaneRayIntersection(Plane *p, Ray r)
+{
+	float t;
+	//Point N = glm::normalize(p->normal);
+	float denominator = glm::dot(r.direction,p->normal);
+	if(denominator!=0)
+	{
+		t = (glm::dot(p->center-r.origin,p->normal)) / denominator;
+		if (t>1000000)
+			return -1;
+		return t;
+	}
+	else
+	{
+		return -1;
+	}
+}
+
+
+/*
+ * Determines distance of intersection of Ray with Sphere, -1 returned if no intersection
+ * http://sci.tuomastonteri.fi/programming/sse/example3
+ */
+__host__ __device__ float SphereRayIntersection(Sphere* s, Ray r) {
+	float a, b, c, d, t1, t2;
+
+	a = glm::dot((r.direction), (r.direction));
+
+	b = glm::dot((r.origin)-(s->center),(r.direction));
+	c = glm::dot((s->center),(s->center)) +glm::dot(r.origin,r.origin) -2.0f*glm::dot(r.origin, s->center)
+		- (s->radius * s->radius);
+	d = (b * b) - (a * c);
+
+	if (d >= 0) {
+
+		t1 = (-1 * b - sqrt(d)) / (a);
+		t2 = (-1 * b + sqrt(d)) / (a);
+
+		if (t2 > t1 && t1 > 0) {
+			return t1;
+
+		} else if (t2 > 0) {
+			return t2;
+		}
+	}
+	return -1;
 }
 
 extern "C" void ijklMove(unsigned char key)
@@ -283,348 +672,6 @@ extern "C" void misc(unsigned char key)
 			break;
 		}
 	}
-}
-
-/*
- * Function Wrapper for the kernel that shoots out photons
- */
-extern "C" kdtree* photonLaunch()
-{
-	Point move;
-
-	//light->position.x -= 2 *sin(theta += .01);	
-
-	//spheres[NUM_SPHERES-1].radius=5;
-	//spheres[NUM_SPHERES-1].center=light->position;
-	//spheres[NUM_SPHERES-1].ambient=CreateColor(1,0,0);
-	//spheres[NUM_SPHERES-1].diffuse=CreateColor(1,1,1);
-	//spheres[NUM_SPHERES-1].specular=CreateColor(1,1,1);
-
-	HANDLE_ERROR( cudaMemcpy(l_d, light, sizeof(RectLight), cudaMemcpyHostToDevice) );
-
-	HANDLE_ERROR( cudaMemcpy(s_d, spheres,sizeof(Sphere)*NUM_SPHERES, cudaMemcpyHostToDevice) );
-
-	HANDLE_ERROR( cudaMemcpy(ph_d, photonArray, sizeof(Photon)*numPhotons*NUM_BOUNCES, cudaMemcpyHostToDevice) );
-
-	// The Kernel Call
-	dim3 gridSize((light->width * PHOTON_DENSITY + 15)/16, (light->height * PHOTON_DENSITY + 15)/16);
-	dim3 blockSize(16,16);
-	CUDAPhotonTrace<<< gridSize, blockSize  >>>(p_d, l_d, s_d, ph_d);
-	cudaThreadSynchronize();
-
-	 
-	if (treeIncomplete) {
-		HANDLE_ERROR( cudaMemcpy(photonArray, ph_d, sizeof(Photon)*numPhotons, cudaMemcpyDeviceToHost) );
-
-		kd_clear(tree);
-		for(int i=0; i < numPhotons; i++) {
-			assert(0 == kd_insert3(tree, photonArray[i].position.x, photonArray[i].position.y, photonArray[i].position.z, &photonArray[i]));
-		}
-		treeIncomplete = false;
-	} 
-	return tree;
-}
-
-extern "C" void renderScene(uchar4 *uch4, kdtree *tree)
-{
-    kdres * nearestPhotons;
-    float * resPoint;
-    float dist;
-    Photon * data;
-    
-	HANDLE_ERROR( cudaMemcpy(cam_d, camera,sizeof(Camera), cudaMemcpyHostToDevice) );
-
-	dim3 gridSize((WINDOW_WIDTH + 15)/16, (WINDOW_HEIGHT + 15)/16);
-	dim3 blockSize(16,16);
-	CUDARayTrace<<< gridSize, blockSize  >>>(cam_d, p_d, s_d, tree, points_d);
-	cudaThreadSynchronize();
-    
-    
-    // Copy "points" from gpu to cpu
-    HANDLE_ERROR( cudaMemcpy(rayPoints, points_d, sizeof(float) * 3 * WINDOW_WIDTH * WINDOW_HEIGHT, cudaMemcpyDeviceToHost) );
-    
-    // Hacky loop to avoid CUDA nonsense at the moment
-    for (int i = 0; i < WINDOW_HEIGHT; i++) {
-    	for (int j = 0; j < WINDOW_WIDTH; j++) {
-			// pull in light from surrounding photons
-			// THere are no shadow photons since we are looking at the photons in the specific radius of a ray intersection
-			//nearestPhotons = kd_nearest_rangef(tree, &rayPoints[i * 3], PHOTON_RANGE);
-		
-			printf("%08d\n", rayPoints);
-		
-			//uch4[i].x = 0;
-			//uch4[i].y = 0;
-			//uch4[i].z = 0;
-		
-		
-			//while( !kd_res_end( nearestPhotons ) ) {
-				//data = (Photon *) kd_res_itemf( nearestPhotons, resPoint );
-				//dist = glm::distance(glm::vec3(rayPoints[i * 3], rayPoints[i * 3 + 1], rayPoints[i * 3 + 2]), 
-				//								 glm::vec3(resPoint[0], resPoint[1], resPoint[2]));
-			
-				//printf("R: %0d\n", 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.r));
-				//printf("G: %0d\n", 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.g));
-				//printf("B: %0d\n", 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.b));
-			
-				//uch4[i].x += 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.r);
-				//uch4[i].y += 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.g);
-				//uch4[i].z += 0xFF * (((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.b);
-			//}
-		
-		
-			//uch4[i * 3].w = 0xFF;
-		}
-    }
-	
-}
-
-
-/*
- * CUDA global function which performs ray tracing. Responsible for initializing and writing to output vector
- */
-__global__ void CUDARayTrace(Camera * cam, Plane * f, Sphere * s, kdtree *tree, float * points)
-{
-	float tanVal = tan(FOV/2);
-
-	//CALCULATE ABSOLUTE ROW,COL
-	int row = blockIdx.y * blockDim.y + threadIdx.y;
-	int col = blockIdx.x * blockDim.x + threadIdx.x;
-	//color_t returnColor;
-	float * rayPoint;
-    Ray r;
-
-	//BOUNDARY CHECK
-	if(row >= WINDOW_HEIGHT || col >= WINDOW_WIDTH)
-		return;
-
-	float rvaly = tanVal - (2 * tanVal / WINDOW_HEIGHT) * row;
-	float rvalx = -1 * WINDOW_WIDTH / WINDOW_HEIGHT * tanVal + (2 * tanVal / WINDOW_HEIGHT) * col;
-	//INIT RAY VALUES
-	r.origin = cam->eye;
-	r.direction = cam->lookAt;
-	r.direction += (rvalx * cam->lookRight);
-	r.direction += (rvaly * cam->lookUp);
-	r.direction = glm::normalize(r.direction);
-	//r.direction.y += tanVal - (2 * tanVal / WINDOW_HEIGHT) * row;
-	//r.direction.x += -1 * WINDOW_WIDTH / WINDOW_HEIGHT * tanVal + (2 * tanVal / WINDOW_HEIGHT) * col;
-
-	//CALC OUTPUT INDEX
-	int index = row *WINDOW_WIDTH + col;
-
-	points[index] = 0xFF;
-
-    //RAY TRACE
-	//RayTrace(r, s, f, tree, &points[index]);
-    
-	//PLACE DATA IN INDEX
-	//pos[index].x = 0xFF * returnColor.r;
-	//pos[index].y = 0xFF * returnColor.g;
-	//pos[index].z = 0xFF * returnColor.b;
-	//pos[index].w = 0xFF * returnColor.f;
-
-}
-
-/*
- * Performs Ray tracing over all spheres for any ray r
- * Returns a point at the moment.
- * @TODO - make it return a color_t by looking into the kd-tree. 
- */
-__device__ void RayTrace(Ray r, Sphere* s, Plane* f, kdtree * tree, float* p3) {
-	color_t color = CreateColor(0, 0, 0); 
-	kdres * nearestPhotons;
-	float t, smallest;
-	int i = 0, closestSphere = -1, closestPlane = -1;
-	//r.direction += r.origin; //Set back to normal
-	Point normalVector;
-	//FIND CLOSEST SPHERE ALONG RAY R
-	while (i < NUM_SPHERES) {
-		t = SphereRayIntersection(s + i, r);
-
-		if (t > 0 && (closestSphere < 0 || t < smallest)) {
-			smallest = t;
-			closestSphere = i;
-		}
-		i++;
-	}
-	//r.direction -= r.origin;
-	i=0;
-	while (i < NUM_PLANES) {
-		t = PlaneRayIntersection(f + i, r);
-		if (t > 0 && ( (closestSphere < 0 && closestPlane < 0) || t < smallest)) {//POSSIBLE LOGIC FIX CLOSESTSPHERE >1
-			smallest = t;
-			closestSphere = -1;
-			closestPlane = i;
-		}
-		i++;
-	}
-
-    p3[0] = r.direction.x * smallest;
-    p3[1] = r.direction.y * smallest;
-    p3[2] = r.direction.z * smallest;
-    
-	//SETUP FOR SHADOW CALCULATIONS
-	/*
-    i = 0;
-	Ray shadowRay;
-    
-	if(closestPlane > -1 || closestSphere > -1)
-	{	
-		float resPoint[3];
-		float pos[] = {r.direction.x * smallest, 
-				r.direction.y * smallest,
-				 r.direction.z * smallest};
-		nearestPhotons = kd_nearest_rangef(tree, pos, PHOTON_RANGE);
-		float dist;
-		Photon * data;
-		while( !kd_res_end( nearestPhotons ) ) {
-			data = kd_res_photonf( nearestPhotons, resPoint );
-			dist = glm::distance(glm::vec3(pos[0], pos[1], pos[2]), glm::vec3(resPoint[0], resPoint[1], resPoint[2]));
-			color.r += ((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.r;
-			color.g += ((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.g;
-			color.b += ((PHOTON_RANGE - dist) / PHOTON_RANGE) * data->color.b;
-		}
-	}
-	
-	return color;
-    */
-}
-
-
-/*
- * CUDA global function which performs photon mappning. Responsible for initializing and writing to output vector
- */
-__global__ void CUDAPhotonTrace(Plane * f, RectLight * l, Sphere * s, Photon * pos)
-{
-	//CALCULATE ABSOLUTE ROW,COL
-	int row = blockIdx.y * blockDim.y + threadIdx.y;
-	int col = blockIdx.x * blockDim.x + threadIdx.x;
-	Photon ph = Photon();
-
-	//BOUNDARY CHECK
-	if(row >= l->height * PHOTON_DENSITY || col >= l->width * PHOTON_DENSITY)
-		return;
-
-	//INIT PHOTON VALUES - Doesn't support a moving light yet, makes assumptions about position
-	ph.position = l->position;
-	ph.position.x += (float)row / (float)(l->height);
-	ph.position.z += (float)col / (float)(l->width);
-
-	ph.direction.x = l->normal.x + (float)row / (float)l->height; //just in hopes that something interesting happens
-	ph.direction.y = l->normal.y; // we'll just keep this one the same since rand ain't workin'
-	ph.direction.z = l->normal.z + (float)col / (float)l->width;
-	ph.direction = glm::normalize(ph.direction);
-
-	//CALC OUTPUT INDEX
-	int index = row * l->height * PHOTON_DENSITY + col;
-
-	//PLACE PHOTON IN INDEX
-	pos[index] = PhotonTrace(ph, s, f);
-
-}
-
-
-
-/*
- * Performs Ray tracing over all spheres for any ray r
- */
-__device__ Photon PhotonTrace(Photon ph, Sphere* s, Plane* f) {
-	
-	color_t color = CreateColor(0, 0, 0); 
-	float t, smallest;
-	int i = 0, closestSphere = -1, closestPlane = -1;
-	//r.direction += r.origin; //Set back to normal
-	Point normalVector;
-	Ray r;
-	r.origin = ph.position;
-	r.direction = ph.direction;
-	//FIND CLOSEST SPHERE ALONG RAY R
-	while (i < NUM_SPHERES) {
-		t = SphereRayIntersection(s + i, r);
-
-		if (t > 0 && (closestSphere < 0 || t < smallest)) {
-			smallest = t;
-			closestSphere = i;
-		}
-		i++;
-	}
-	//r.direction -= r.origin;
-	i=0;
-	while (i < NUM_PLANES) {
-		t = PlaneRayIntersection(f + i, r);
-		if (t > 0 && ( (closestSphere < 0 && closestPlane < 0) || t < smallest)) {//POSSIBLE LOGIC FIX CLOSESTSPHERE >1
-			smallest = t;
-			closestSphere = -1;
-			closestPlane = i;
-		}
-		i++;
-	}
-
-	if (closestSphere > -1) {
-		ph.position.x += smallest * ph.direction.x;
-		ph.position.y += smallest * ph.direction.y;
-		ph.position.z += smallest * ph.direction.z;
-
-		ph.color = s[closestSphere].ambient;
-	} else if (closestPlane > -1) {
-		ph.position.x += smallest * ph.direction.x;
-		ph.position.y += smallest * ph.direction.y;
-		ph.position.z += smallest * ph.direction.z;	
-		ph.color = f[closestPlane].ambient;
-	}
-
-	return ph;
-
-}
-
-/*
- * Determines distance of intersection of Ray with Plane, -1 returned if no intersection
- */
-__device__ float PlaneRayIntersection(Plane *p, Ray r)
-{
-	float t;
-	//Point N = glm::normalize(p->normal);
-	float denominator = glm::dot(r.direction,p->normal);
-	if(denominator!=0)
-	{
-		t = (glm::dot(p->center-r.origin,p->normal)) / denominator;
-		if (t>1000000)
-			return -1;
-		return t;
-	}
-	else
-	{
-		return -1;
-	}
-}
-
-
-/*
- * Determines distance of intersection of Ray with Sphere, -1 returned if no intersection
- * http://sci.tuomastonteri.fi/programming/sse/example3
- */
-__device__ float SphereRayIntersection(Sphere* s, Ray r) {
-	float a, b, c, d, t1, t2;
-
-	a = glm::dot((r.direction), (r.direction));
-
-	b = glm::dot((r.origin)-(s->center),(r.direction));
-	c = glm::dot((s->center),(s->center)) +glm::dot(r.origin,r.origin) -2.0f*glm::dot(r.origin, s->center)
-		- (s->radius * s->radius);
-	d = (b * b) - (a * c);
-
-	if (d >= 0) {
-
-		t1 = (-1 * b - sqrt(d)) / (a);
-		t2 = (-1 * b + sqrt(d)) / (a);
-
-		if (t2 > t1 && t1 > 0) {
-			return t1;
-
-		} else if (t2 > 0) {
-			return t2;
-		}
-	}
-	return -1;
 }
 
 /*
