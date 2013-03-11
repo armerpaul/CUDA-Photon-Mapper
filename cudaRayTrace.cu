@@ -125,41 +125,30 @@ extern "C" void launch_kernel(uchar4* pos, unsigned int image_width,
 			cudaDeviceSynchronize();
 			
 			HANDLE_ERROR( cudaMemcpy(points, pt_d, 1024 * sizeof(Point), cudaMemcpyDeviceToHost) );
-			for (long i = 0; i < WINDOW_WIDTH * WINDOW_HEIGHT; i++) {
-				presults = kd_nearest_range3f( tree, photonArray[i].ray.origin.x, 
-													 photonArray[i].ray.origin.y,
-													 photonArray[i].ray.origin.z, 1.f);
+			presults = kd_nearest_range3f( tree, photonArray[i].ray.origin.x, 
+												 photonArray[i].ray.origin.y,
+												 photonArray[i].ray.origin.z, 10.f);
 
-				printf( "found %d results:\n", kd_res_size(presults) );
-				int limit = 0;
-				while( !kd_res_end( presults ) && limit++ < 10) {
-					/* get the data and position of the current result item */
-					data = (Photon*)kd_res_itemf( presults, point );
-					
-					/* compute the distance of the current result from the pt */
-					dist = glm::distance(glm::vec3(points[i].x, points[i].y, points[i].z), 
-										 glm::vec3(point[0], point[1], point[2] ));
+			printf( "found %d results:\n", kd_res_size(presults) );
+			int limit = 0;
+			while( !kd_res_end( presults ) && limit++ < 10) {
+				/* get the data and position of the current result item */
+				data = (Photon*)kd_res_itemf( presults, point );
+				
+				/* compute the distance of the current result from the pt */
+				dist = glm::distance(glm::vec3(points[i].x, points[i].y, points[i].z), 
+									 glm::vec3(point[0], point[1], point[2] ));
 
-					/* print out the retrieved data */
-					printf("distance: %f", dist);
+				/* print out the retrieved data */
+				printf("RED: %f, GREEN: %f. BLUE %f\n", data->color.r, data->color.g, data->color.b);
 
-					/* go to the next entry */
-					kd_res_next( presults );
-				}
-				kd_res_free(presults);
+				/* go to the next entry */
+				kd_res_next( presults );
 			}
+			kd_res_free(presults);
 			
 		}
 	}
-
-	
-	
-	
-	// Calculate color of each point
-	
-	
-	// I have to do the color assignment on the GPU because texture is created there -- WILL FIX *crosses fingers*
-	
 } 
 
 
